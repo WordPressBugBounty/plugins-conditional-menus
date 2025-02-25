@@ -1,10 +1,11 @@
 === Conditional Menus ===
 Contributors: themifyme
 Tags: menu, conditional-tags, context, menu-items, admin
-Requires at least: 4.0
-Tested up to: 6.5.4
-Stable tag: 1.2.5
-License: GPLv2 or later
+Requires at least: 5.0
+Tested up to: 6.7.2
+Stable tag: 1.2.6
+License: GPL v2
+License URI: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
 This plugin enables you to set conditional menus per posts, pages, categories, archive pages, etc.
 
