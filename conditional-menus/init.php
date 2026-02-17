@@ -2,7 +2,7 @@
 /*
 Plugin Name:  Conditional Menus
 Plugin URI:   https://themify.me/conditional-menus
-Version:      1.2.6
+Version:      1.2.7
 Author:       Themify
 Author URI:   https://themify.me/
 Description:  This plugin enables you to set conditional menus per posts, pages, categories, archive pages, etc.
@@ -181,14 +181,18 @@ class Themify_Conditional_Menus {
 	}
 
 	public function init() {
-		if( isset( $_GET['action'] ) && 'locations' === $_GET['action'] ) {
+		if( ( isset( $_GET['action'] ) && 'locations' === $_GET['action'] ) || isset( $_POST['menu-locations'] ) ) {
 			$this->save_options();
 			add_action( 'admin_enqueue_scripts', array( &$this, 'admin_enqueue' ) );
+			add_action( 'admin_footer', array( $this, 'output_nonce' ) );
 		}
 	}
 
 	public function save_options() {
 		if( isset( $_POST['menu-locations'] ) ) {
+			if ( ! isset( $_POST['themify_cm_nonce'] ) || ! wp_verify_nonce( $_POST['themify_cm_nonce'], 'themify_cm_nonce' ) ) {
+				return;
+			}
 		    $themify_cm = isset( $_POST['themify_cm'] ) ? $_POST['themify_cm'] : array();
 		    set_theme_mod( 'themify_conditional_menus', $themify_cm );
 		}
@@ -200,9 +204,13 @@ class Themify_Conditional_Menus {
 		die;
 	}
 
+	public function output_nonce() {
+		wp_nonce_field( 'themify_cm_nonce', 'themify_cm_nonce' );
+	}
+
 	public function admin_enqueue() {
 		global $_wp_registered_nav_menus;
-		$version='1.2.3';
+		$version='1.2.7';
 		self::themify_enque_style( 'themify-conditional-menus', THEMIFY_CM_URI . 'assets/admin.css', null, $version );
 		wp_enqueue_script( 'themify-conditional-menus', self::themify_enque(THEMIFY_CM_URI . 'assets/admin.js'), array( 'jquery', 'jquery-ui-tabs' ), $version, true );
 		wp_localize_script( 'themify-conditional-menus', 'themify_cm', array(

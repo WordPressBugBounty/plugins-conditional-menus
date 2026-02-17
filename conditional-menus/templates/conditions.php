@@ -10,7 +10,7 @@ $taxonomies = array_map( 'get_taxonomy', $taxonomies );
 
 <div id="themify-cm-conditions" class="themify-cm-conditions-container themify-admin-lightbox tf_clearfix" style="display: none;">
 	<h3 class="themify-cm-title"><?php _e( 'Condition', 'themify-cm' ) ?></h3>
-	<a href="#" class="themify-cm-close">x</a>
+	<a href="#" class="themify-cm-close"><span class="screen-reader-text">Close</span></a>
 	<div class="lightbox_container">
 		<form id="visibility-tabs" class="ui-tabs">
 			<ul class="tf_clearfix">

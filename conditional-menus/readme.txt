@@ -1,9 +1,9 @@
 === Conditional Menus ===
 Contributors: themifyme
 Tags: menu, conditional-tags, context, menu-items, admin
-Requires at least: 5.0
-Tested up to: 6.7.2
-Stable tag: 1.2.6
+Requires at least: 4.0
+Tested up to: 6.9.1
+Stable tag: 1.2.7
 License: GPL v2
 License URI: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 
