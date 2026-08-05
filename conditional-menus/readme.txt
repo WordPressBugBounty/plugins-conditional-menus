@@ -2,8 +2,8 @@
 Contributors: themifyme
 Tags: menu, conditional-tags, context, menu-items, admin
 Requires at least: 4.0
-Tested up to: 6.9.1
-Stable tag: 1.2.7
+Tested up to: 7.0.2
+Stable tag: 1.2.8
 License: GPL v2
 License URI: https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 

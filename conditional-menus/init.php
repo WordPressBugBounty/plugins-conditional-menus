@@ -2,7 +2,7 @@
 /*
 Plugin Name:  Conditional Menus
 Plugin URI:   https://themify.me/conditional-menus
-Version:      1.2.7
+Version:      1.2.8
 Author:       Themify
 Author URI:   https://themify.me/
 Description:  This plugin enables you to set conditional menus per posts, pages, categories, archive pages, etc.
@@ -35,6 +35,9 @@ if ( !defined( 'ABSPATH' ) ) exit;
 register_activation_hook( __FILE__, array( 'Themify_Conditional_Menus', 'activate' ) );
 
 class Themify_Conditional_Menus {
+
+	/** @var array|null Resolved menu locations for the current request */
+	private $resolved_locations = null;
 
 	public function __construct() {
 		add_action( 'plugins_loaded', array( $this, 'constants' ), 1 );
@@ -86,54 +89,115 @@ class Themify_Conditional_Menus {
 			add_action( 'admin_init', array( $this, 'activation_redirect' ) );
 			add_action( 'wp_delete_nav_menu', array( $this, 'wp_delete_nav_menu' ) );
 		} else {
-			add_filter( 'wp_nav_menu_args', array( $this, 'setup_menus' ) );
-			add_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), 99 );
+			add_action( 'wp', array( $this, 'resolve_locations' ), 20 );
+			/* Run after WPML (and anything else) that filters menu locations */
+			add_filter( 'wp_nav_menu_args', array( $this, 'setup_menus' ), PHP_INT_MAX );
+			add_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), PHP_INT_MAX );
 		}
 	}
 
 	public function get_options() {
-		remove_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), 99 );
-		$options = get_theme_mod( 'themify_conditional_menus', array() );
+		remove_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), PHP_INT_MAX );
+		$options = $this->get_conditional_menus_theme_mod();
 		$options = wp_parse_args( $options, get_nav_menu_locations() );
 		if( ! is_admin() ) {
-			add_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), 99 );
+			add_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), PHP_INT_MAX );
 		}
 		return $options;
 	}
 
+	/**
+	 * Read conditional menu assignments from theme mods (raw DB, bypasses language filters).
+	 *
+	 * @return array
+	 */
+	private function get_conditional_menus_theme_mod() {
+		foreach ( array_unique( array_filter( array( get_option( 'stylesheet' ), get_option( 'template' ) ) ) ) as $theme_slug ) {
+			$mods = $this->get_raw_theme_mods( $theme_slug );
+			if ( is_array( $mods ) && ! empty( $mods['themify_conditional_menus'] ) && is_array( $mods['themify_conditional_menus'] ) ) {
+				return $mods['themify_conditional_menus'];
+			}
+		}
+		$options = get_theme_mod( 'themify_conditional_menus', array() );
+		return is_array( $options ) ? $options : array();
+	}
+
+	/**
+	 * @param string $theme_slug
+	 * @return array|null
+	 */
+	private function get_raw_theme_mods( $theme_slug ) {
+		global $wpdb;
+		if ( ! $theme_slug ) {
+			return null;
+		}
+		$raw = $wpdb->get_var( $wpdb->prepare(
+			"SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
+			'theme_mods_' . $theme_slug
+		) );
+		if ( ! is_string( $raw ) || $raw === '' ) {
+			return null;
+		}
+		$mods = maybe_unserialize( $raw );
+		return is_array( $mods ) ? $mods : null;
+	}
+
+	/**
+	 * Pre-resolve conditional menus once the main query is available.
+	 */
+	public function resolve_locations() {
+		remove_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), PHP_INT_MAX );
+		$locations = get_nav_menu_locations();
+		add_filter( 'theme_mod_nav_menu_locations', array( $this, 'theme_mod_nav_menu_locations' ), PHP_INT_MAX );
+		$this->resolved_locations = $this->apply_conditions_to_locations( is_array( $locations ) ? $locations : array() );
+	}
+
 	public function theme_mod_nav_menu_locations( $locations = array() ) {
-		if( ! empty( $locations ) ) {
-			$menu_assignments = $this->get_options();
-			$hasLng=function_exists( 'pll_current_language' ) && function_exists( 'pll_default_language' );
-			foreach( $locations as $location => $menu_id ) {
-				if( empty( $menu_assignments[$location] ) ) continue;
+		if ( is_array( $this->resolved_locations ) ) {
+			return $this->resolved_locations;
+		}
+		if ( empty( $locations ) || ! did_action( 'wp' ) ) {
+			return $locations;
+		}
+		return $this->apply_conditions_to_locations( $locations );
+	}
 
-				$menus = $menu_assignments[$location];
+	/**
+	 * @param array $locations
+	 * @return array
+	 */
+	private function apply_conditions_to_locations( $locations ) {
+		$menu_assignments = $this->get_options();
+		$hasLng = function_exists( 'pll_current_language' ) && function_exists( 'pll_default_language' );
 
-				// PolyLang support
-				if( $hasLng===true ) {
-					if( pll_current_language() !== pll_default_language() ) {
-						$polylang_location = $location . '___' . pll_current_language();
-						
-						if( ! empty( $menu_assignments[$polylang_location] ) ) {
-							$menus = $menu_assignments[$polylang_location];
-						}
-					}
+		foreach ( $locations as $location => $menu_id ) {
+			if ( empty( $menu_assignments[ $location ] ) || ! is_array( $menu_assignments[ $location ] ) ) {
+				continue;
+			}
+
+			$menus = $menu_assignments[ $location ];
+
+			if ( $hasLng && pll_current_language() !== pll_default_language() ) {
+				$polylang_location = $location . '___' . pll_current_language();
+				if ( ! empty( $menu_assignments[ $polylang_location ] ) && is_array( $menu_assignments[ $polylang_location ] ) ) {
+					$menus = $menu_assignments[ $polylang_location ];
 				}
+			}
 
-				if( is_array( $menus ) ) {
-					foreach( $menus as $id => $new_menu ) {
-						if ( empty( $new_menu['menu'] ) || empty( $new_menu['condition'] ) ) {
-							continue;
-						}
-						if( $this->check_visibility( $new_menu['condition'] ) ) {
-							if( $new_menu[ 'menu' ] == 0 ) {
-								unset( $locations[$location] );
-							} else {
-								$locations[$location] = $new_menu[ 'menu' ];
-							}
-						}
-					}
+			foreach ( $menus as $new_menu ) {
+				if ( ! is_array( $new_menu ) || ! isset( $new_menu['menu'], $new_menu['condition'] ) ) {
+					continue;
+				}
+				if ( $new_menu['menu'] === '' || $new_menu['condition'] === '' ) {
+					continue;
+				}
+				if ( ! $this->check_visibility( $new_menu['condition'] ) ) {
+					continue;
+				}
+				if ( (string) $new_menu['menu'] === '0' ) {
+					unset( $locations[ $location ] );
+				} else {
+					$locations[ $location ] = $this->translate_nav_menu_id( $new_menu['menu'] );
 				}
 			}
 		}
@@ -149,26 +213,28 @@ class Themify_Conditional_Menus {
 	 */
 	public function setup_menus( $args ) {
 		$menu_assignments = $this->get_options();
-		if (
-			! isset( $args['menu'] ) // if $args['menu'] is set, bail. Only swap menus in nav menu locations.
-			&& ! empty( $args['theme_location'] ) && isset( $menu_assignments[ $args['theme_location'] ] )
-		) {
-			if( is_array( $menu_assignments[$args['theme_location']] ) && ! empty( $menu_assignments[$args['theme_location']] ) ) {
-				foreach( $menu_assignments[$args['theme_location']] as $id => $new_menu ) {
-					if( $new_menu['menu'] == '' || $new_menu['condition'] == '' ) {
-						continue;
-					}
-					if( $this->check_visibility( $new_menu['condition'] ) ) {
-						if( $new_menu[ 'menu' ] == 0 ) {
-							add_filter( 'pre_wp_nav_menu', array( $this, 'disable_menu' ), 10, 2 );
-							$args['echo'] = false;
-						} else {
-							$args['menu'] = $new_menu[ 'menu' ];
-							/* reset theme_location arg, add filter for 3rd party plugins */
-							$args['theme_location'] = apply_filters( 'conditional_menus_theme_location', '', $new_menu, $args );
-						}
-					}
-				}
+		$theme_location = ! empty( $args['theme_location'] ) ? $args['theme_location'] : '';
+		if ( $theme_location === '' || empty( $menu_assignments[ $theme_location ] ) || ! is_array( $menu_assignments[ $theme_location ] ) ) {
+			return $args;
+		}
+
+		/* Allow overriding even when a menu ID is already set (e.g. by WPML) */
+		foreach ( $menu_assignments[ $theme_location ] as $new_menu ) {
+			if ( ! is_array( $new_menu ) || ! isset( $new_menu['menu'], $new_menu['condition'] ) ) {
+				continue;
+			}
+			if ( $new_menu['menu'] === '' || $new_menu['condition'] === '' ) {
+				continue;
+			}
+			if ( ! $this->check_visibility( $new_menu['condition'] ) ) {
+				continue;
+			}
+			if ( (string) $new_menu['menu'] === '0' ) {
+				add_filter( 'pre_wp_nav_menu', array( $this, 'disable_menu' ), 10, 2 );
+				$args['echo'] = false;
+			} else {
+				$args['menu'] = $this->translate_nav_menu_id( $new_menu['menu'] );
+				$args['theme_location'] = apply_filters( 'conditional_menus_theme_location', '', $new_menu, $args );
 			}
 		}
 
@@ -210,7 +276,7 @@ class Themify_Conditional_Menus {
 
 	public function admin_enqueue() {
 		global $_wp_registered_nav_menus;
-		$version='1.2.7';
+		$version='1.2.8';
 		self::themify_enque_style( 'themify-conditional-menus', THEMIFY_CM_URI . 'assets/admin.css', null, $version );
 		wp_enqueue_script( 'themify-conditional-menus', self::themify_enque(THEMIFY_CM_URI . 'assets/admin.js'), array( 'jquery', 'jquery-ui-tabs' ), $version, true );
 		wp_localize_script( 'themify-conditional-menus', 'themify_cm', array(
@@ -233,6 +299,9 @@ class Themify_Conditional_Menus {
 	public function check_visibility( $logic ) {
 		parse_str( $logic, $logic );
 		$query_object = get_queried_object();
+		/* WPML: add translated page/term slugs to the condition so core checks succeed */
+		$this->expand_wpml_post_type_conditions( $logic );
+		$this->expand_wpml_tax_conditions( $logic );
 
 		// Logged-in check
 		if( isset( $logic['general']['logged'] ) ) {
@@ -267,9 +336,9 @@ class Themify_Conditional_Menus {
 				|| ( isset($logic['general']['year'])  && is_year())
 				|| ( isset($logic['general']['month']) && is_month())
 				|| (isset($logic['general']['day']) && is_day())
-				|| ( is_singular() && isset( $logic['general'][$query_object->post_type] ) && $query_object->post_type !== 'page' && $query_object->post_type !== 'post' )
-				|| ( is_tax() && isset( $logic['general'][$query_object->taxonomy] ) )
-				|| ( is_post_type_archive() && isset( $logic['general'][ $query_object->name . '_archive' ] ) )
+				|| ( is_singular() && is_object( $query_object ) && isset( $logic['general'][$query_object->post_type] ) && $query_object->post_type !== 'page' && $query_object->post_type !== 'post' )
+				|| ( is_tax() && is_object( $query_object ) && isset( $logic['general'][$query_object->taxonomy] ) )
+				|| ( is_post_type_archive() && is_object( $query_object ) && isset( $logic['general'][ $query_object->name . '_archive' ] ) )
 			) {
 				return true;
 			} else { // let's dig deeper into more specific visibility rules
@@ -294,12 +363,18 @@ class Themify_Conditional_Menus {
 										if( isset($logic['tax']['category_single'][$key][$term->slug]) ){
 											return true;
 										}
+										if ( $this->wpml_term_slug_in_condition( $term, $key, $logic['tax']['category_single'][$key] ) ) {
+											return true;
+										}
 									}
 								}
 							}
 						}
 					} else {
 						foreach( $logic['tax'] as $tax => $terms ) {
+							if ( $tax === 'category_single' || ! is_array( $terms ) ) {
+								continue;
+							}
 							$terms = array_keys( $terms );
 							self::update_non_ascii_slugs( $terms );
 							if( ( $tax === 'category' && is_category( $terms ) )
@@ -308,38 +383,36 @@ class Themify_Conditional_Menus {
 							) {
 								return true;
 							}
+							if ( $this->wpml_queried_term_matches( $tax, $terms ) ) {
+								return true;
+							}
 						}
 					}
 				}
 
 				if ( ! empty( $logic['post_type'] ) ) {
-
 					foreach( $logic['post_type'] as $post_type => $posts ) {
 						$posts = array_keys( $posts );
 						self::update_non_ascii_slugs( $posts );
 
 						if (
-							// Post single
 							( $post_type === 'post' && is_single( $posts ) )
-							// Page view
 							|| ( $post_type === 'page' && (
 								( 
 									( is_page( $posts )
-									// check for pages that have a Parent, the slug for these pages are stored differently.
-									|| ( isset( $query_object->post_parent ) && $query_object->post_parent > 0 &&
+									|| ( is_object( $query_object ) && isset( $query_object->post_parent ) && $query_object->post_parent > 0 &&
 									     ( in_array( '/' . str_replace( strtok( get_home_url(), '?'), '', remove_query_arg( 'lang', get_permalink( $query_object->ID ) ) ), $posts ) ||
 									     in_array( str_replace( strtok( get_home_url(), '?'), '', remove_query_arg( 'lang', get_permalink( $query_object->ID ) ) ), $posts ) ||
 									     in_array( '/'.$this->child_post_name($query_object).'/', $posts ) )
 									  )
 								) )
-								|| ( ! is_front_page() && is_home() &&  in_array( get_post_field( 'post_name', get_option( 'page_for_posts' ) ), $posts,true ) ) // check for Posts page
-								|| ( class_exists( 'WooCommerce' ) && function_exists( 'is_shop' ) && is_shop() && in_array( get_post_field( 'post_name', wc_get_page_id( 'shop' ) ), $posts )  ) // check for WC Shop page
+								|| ( ! is_front_page() && is_home() &&  in_array( get_post_field( 'post_name', get_option( 'page_for_posts' ) ), $posts,true ) )
+								|| ( class_exists( 'WooCommerce' ) && function_exists( 'is_shop' ) && is_shop() && in_array( get_post_field( 'post_name', wc_get_page_id( 'shop' ) ), $posts )  )
 							) )
-							// Custom Post Types single view check
-							|| ( is_singular( $post_type ) && in_array( $query_object->post_name, $posts,true ) )
-							|| ( is_singular( $post_type ) && isset( $query_object->post_parent ) && $query_object->post_parent > 0 && in_array( '/'.$this->child_post_name($query_object).'/', $posts,true ) )
-							// for all posts of a post type.
+							|| ( is_singular( $post_type ) && is_object( $query_object ) && in_array( $query_object->post_name, $posts,true ) )
+							|| ( is_singular( $post_type ) && is_object( $query_object ) && isset( $query_object->post_parent ) && $query_object->post_parent > 0 && in_array( '/'.$this->child_post_name($query_object).'/', $posts,true ) )
 							|| ( is_singular( $post_type ) && get_post_type() === $post_type && in_array( 'E_ALL', $posts ) )
+							|| ( is_singular( $post_type ) && $query_object instanceof WP_Post && $this->wpml_current_post_matches_slugs( $query_object, $posts ) )
 						) {
 							return true;
 						}
@@ -491,6 +564,511 @@ class Themify_Conditional_Menus {
 		}
 
 		return $str;
+	}
+
+	/**
+	 * Whether WPML is available for object ID translation.
+	 *
+	 * @return bool
+	 */
+	private function is_wpml_active() {
+		return defined( 'ICL_SITEPRESS_VERSION' ) || has_filter( 'wpml_object_id' );
+	}
+
+	/**
+	 * Expand saved post_type condition slugs with their WPML translations (Builder Pro approach).
+	 * Conditions are saved against default-language slugs; this adds current-language slugs so
+	 * is_page() / post_name checks succeed on translated pages.
+	 *
+	 * @param array $logic
+	 */
+	private function expand_wpml_post_type_conditions( &$logic ) {
+		if ( empty( $logic['post_type'] ) || ! is_array( $logic['post_type'] ) || ! $this->is_wpml_active() ) {
+			return;
+		}
+
+		$default_lang = apply_filters( 'wpml_default_language', null );
+		$current_lang = apply_filters( 'wpml_current_language', null );
+		if ( ! is_string( $default_lang ) || $default_lang === '' || $default_lang === $current_lang ) {
+			return;
+		}
+
+		foreach ( $logic['post_type'] as $post_type => $posts ) {
+			if ( ! is_array( $posts ) ) {
+				continue;
+			}
+			$extra = array();
+			foreach ( array_keys( $posts ) as $slug ) {
+				if ( ! is_string( $slug ) || $slug === '' || $slug === 'E_ALL' ) {
+					continue;
+				}
+				$path = trim( $slug, '/' );
+				if ( $path === '' ) {
+					continue;
+				}
+
+				$source_id = $this->find_post_id_by_path_unfiltered( $path, $post_type, $default_lang );
+				if ( $source_id < 1 ) {
+					continue;
+				}
+
+				$translated_id = (int) apply_filters( 'wpml_object_id', $source_id, $post_type, false, $current_lang );
+				if ( $translated_id < 1 || $translated_id === $source_id ) {
+					continue;
+				}
+
+				$translated_slug = $this->get_post_name_raw( $translated_id );
+				if ( $translated_slug !== '' ) {
+					$extra[ $translated_slug ] = 'on';
+				}
+
+				$parent = (int) $this->get_post_field_raw( $translated_id, 'post_parent' );
+				if ( $parent > 0 ) {
+					$path_slug = $this->get_post_path_raw( $translated_id );
+					if ( $path_slug !== '' ) {
+						$extra[ '/' . $path_slug . '/' ] = 'on';
+					}
+				}
+			}
+			if ( ! empty( $extra ) ) {
+				$logic['post_type'][ $post_type ] = array_merge( $posts, $extra );
+			}
+		}
+	}
+
+	/**
+	 * Expand saved taxonomy condition slugs with their WPML translations.
+	 * e.g. tax[category][uncategorized] also matches non-classifiee on French archives.
+	 *
+	 * @param array $logic
+	 */
+	private function expand_wpml_tax_conditions( &$logic ) {
+		if ( empty( $logic['tax'] ) || ! is_array( $logic['tax'] ) || ! $this->is_wpml_active() ) {
+			return;
+		}
+
+		$default_lang = apply_filters( 'wpml_default_language', null );
+		$current_lang = apply_filters( 'wpml_current_language', null );
+		if ( ! is_string( $default_lang ) || $default_lang === '' || $default_lang === $current_lang ) {
+			return;
+		}
+
+		foreach ( $logic['tax'] as $taxonomy => $terms ) {
+			if ( $taxonomy === 'category_single' ) {
+				if ( ! is_array( $terms ) ) {
+					continue;
+				}
+				foreach ( $terms as $tax_name => $tax_terms ) {
+					if ( ! is_array( $tax_terms ) ) {
+						continue;
+					}
+					$extra = $this->get_wpml_translated_term_slugs( $tax_name, array_keys( $tax_terms ), $default_lang, $current_lang );
+					if ( ! empty( $extra ) ) {
+						$logic['tax']['category_single'][ $tax_name ] = array_merge( $tax_terms, $extra );
+					}
+				}
+				continue;
+			}
+
+			if ( ! is_array( $terms ) ) {
+				continue;
+			}
+			$extra = $this->get_wpml_translated_term_slugs( $taxonomy, array_keys( $terms ), $default_lang, $current_lang );
+			if ( ! empty( $extra ) ) {
+				$logic['tax'][ $taxonomy ] = array_merge( $terms, $extra );
+			}
+		}
+	}
+
+	/**
+	 * Map default-language term slugs to current-language slug => on entries.
+	 *
+	 * @param string $taxonomy
+	 * @param array  $slugs
+	 * @param string $default_lang
+	 * @param string $current_lang
+	 * @return array
+	 */
+	private function get_wpml_translated_term_slugs( $taxonomy, $slugs, $default_lang, $current_lang ) {
+		$extra = array();
+		foreach ( $slugs as $slug ) {
+			if ( ! is_string( $slug ) || $slug === '' ) {
+				continue;
+			}
+			$source_id = $this->find_term_id_by_slug_unfiltered( $slug, $taxonomy, $default_lang );
+			if ( $source_id < 1 ) {
+				continue;
+			}
+			$translated_id = (int) apply_filters( 'wpml_object_id', $source_id, $taxonomy, false, $current_lang );
+			if ( $translated_id < 1 || $translated_id === $source_id ) {
+				continue;
+			}
+			$translated_slug = $this->get_term_slug_raw( $translated_id );
+			if ( $translated_slug !== '' ) {
+				$extra[ $translated_slug ] = 'on';
+			}
+		}
+		return $extra;
+	}
+
+	/**
+	 * Whether the current post matches condition slugs via WPML translation group.
+	 *
+	 * @param WP_Post $post
+	 * @param array   $slugs
+	 * @return bool
+	 */
+	private function wpml_current_post_matches_slugs( $post, $slugs ) {
+		if ( ! $this->is_wpml_active() || ! ( $post instanceof WP_Post ) || empty( $slugs ) ) {
+			return false;
+		}
+
+		$current_slug = $this->get_post_name_raw( (int) $post->ID );
+		if ( $current_slug !== '' && in_array( $current_slug, $slugs, true ) ) {
+			return true;
+		}
+
+		$default_lang = apply_filters( 'wpml_default_language', null );
+		$current_lang = apply_filters( 'wpml_current_language', null );
+		if ( ! is_string( $default_lang ) || $default_lang === '' ) {
+			return false;
+		}
+
+		$original_id = (int) apply_filters( 'wpml_object_id', (int) $post->ID, $post->post_type, true, $default_lang );
+		if ( $original_id > 0 ) {
+			$original_slug = $this->get_post_name_raw( $original_id );
+			if ( $original_slug !== '' && in_array( $original_slug, $slugs, true ) ) {
+				return true;
+			}
+			$original_path = $this->get_post_path_raw( $original_id );
+			if ( $original_path !== '' && in_array( '/' . $original_path . '/', $slugs, true ) ) {
+				return true;
+			}
+		}
+
+		if ( ! is_string( $current_lang ) || $current_lang === '' || $current_lang === $default_lang ) {
+			return false;
+		}
+
+		$element_type = 'post_' . $post->post_type;
+		foreach ( $slugs as $slug ) {
+			if ( ! is_string( $slug ) || $slug === '' || $slug === 'E_ALL' ) {
+				continue;
+			}
+			$path = trim( $slug, '/' );
+			if ( $path === '' ) {
+				continue;
+			}
+
+			$source_id = $this->find_post_id_by_path_unfiltered( $path, $post->post_type, $default_lang );
+			if ( $source_id < 1 ) {
+				continue;
+			}
+
+			$translated_id = (int) apply_filters( 'wpml_object_id', $source_id, $post->post_type, false, $current_lang );
+			if ( $translated_id > 0 && $translated_id === (int) $post->ID ) {
+				return true;
+			}
+
+			$source_trid = apply_filters( 'wpml_element_trid', null, $source_id, $element_type );
+			$current_trid = apply_filters( 'wpml_element_trid', null, (int) $post->ID, $element_type );
+			if ( $source_trid && $current_trid && (int) $source_trid === (int) $current_trid ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * @param int    $post_id
+	 * @param string $field
+	 * @return string
+	 */
+	private function get_post_field_raw( $post_id, $field ) {
+		global $wpdb;
+		$post_id = (int) $post_id;
+		$allowed = array( 'post_name', 'post_parent', 'post_type', 'post_status' );
+		if ( $post_id < 1 || ! in_array( $field, $allowed, true ) ) {
+			return '';
+		}
+		$value = $wpdb->get_var( $wpdb->prepare(
+			"SELECT {$field} FROM {$wpdb->posts} WHERE ID = %d LIMIT 1",
+			$post_id
+		) );
+		return is_string( $value ) || is_numeric( $value ) ? (string) $value : '';
+	}
+
+	/**
+	 * @param int $post_id
+	 * @return string
+	 */
+	private function get_post_name_raw( $post_id ) {
+		return $this->get_post_field_raw( $post_id, 'post_name' );
+	}
+
+	/**
+	 * Build parent/child path from DB (unfiltered).
+	 *
+	 * @param int $post_id
+	 * @return string
+	 */
+	private function get_post_path_raw( $post_id ) {
+		$parts = array();
+		$id = (int) $post_id;
+		$guard = 0;
+		while ( $id > 0 && $guard < 20 ) {
+			$name = $this->get_post_name_raw( $id );
+			if ( $name === '' ) {
+				break;
+			}
+			array_unshift( $parts, $name );
+			$id = (int) $this->get_post_field_raw( $id, 'post_parent' );
+			$guard++;
+		}
+		return implode( '/', $parts );
+	}
+
+	/**
+	 * Find a post ID by slug/path without WPML language filtering.
+	 *
+	 * @param string $path
+	 * @param string $post_type
+	 * @param string $lang
+	 * @return int
+	 */
+	private function find_post_id_by_path_unfiltered( $path, $post_type, $lang ) {
+		global $wpdb;
+		$path = trim( (string) $path, '/' );
+		if ( $path === '' ) {
+			return 0;
+		}
+
+		$parts = explode( '/', $path );
+		$parent = 0;
+		$id = 0;
+		foreach ( $parts as $part ) {
+			$candidates = $wpdb->get_col( $wpdb->prepare(
+				"SELECT ID FROM {$wpdb->posts} WHERE post_name = %s AND post_type = %s AND post_parent = %d AND post_status = 'publish' ORDER BY ID ASC",
+				$part,
+				$post_type,
+				$parent
+			) );
+			if ( empty( $candidates ) ) {
+				return 0;
+			}
+
+			$id = 0;
+			foreach ( $candidates as $candidate_id ) {
+				$candidate_id = (int) $candidate_id;
+				$in_lang = (int) apply_filters( 'wpml_object_id', $candidate_id, $post_type, false, $lang );
+				if ( $in_lang === $candidate_id ) {
+					$id = $candidate_id;
+					break;
+				}
+			}
+			if ( $id < 1 ) {
+				/* Fall back to first candidate mapped into $lang */
+				$id = (int) apply_filters( 'wpml_object_id', (int) $candidates[0], $post_type, true, $lang );
+			}
+			if ( $id < 1 ) {
+				return 0;
+			}
+			$parent = $id;
+		}
+
+		return $id;
+	}
+
+	/**
+	 * Translate a nav menu ID to the current WPML language.
+	 * Falls back to the original when the translation is missing or has no items.
+	 *
+	 * @param int $menu_id
+	 * @return int
+	 */
+	private function translate_nav_menu_id( $menu_id ) {
+		$menu_id = (int) $menu_id;
+		if ( $menu_id <= 0 || ! $this->is_wpml_active() ) {
+			return $menu_id;
+		}
+
+		$current_lang = apply_filters( 'wpml_current_language', null );
+		$translated = (int) apply_filters( 'wpml_object_id', $menu_id, 'nav_menu', false, $current_lang );
+		if ( $translated <= 0 || $translated === $menu_id ) {
+			return $menu_id;
+		}
+
+		$items = wp_get_nav_menu_items( $translated );
+		return ! empty( $items ) ? $translated : $menu_id;
+	}
+
+	/**
+	 * Whether a WPML-translated term's default-language slug is in a condition map.
+	 *
+	 * @param WP_Term $term
+	 * @param string  $taxonomy
+	 * @param array   $condition_terms slug => on
+	 * @return bool
+	 */
+	private function wpml_term_slug_in_condition( $term, $taxonomy, $condition_terms ) {
+		if ( ! $this->is_wpml_active() || ! ( $term instanceof WP_Term ) || empty( $condition_terms ) ) {
+			return false;
+		}
+
+		$default_lang = apply_filters( 'wpml_default_language', null );
+		$current_lang = apply_filters( 'wpml_current_language', null );
+		if ( ! is_string( $default_lang ) || $default_lang === '' || $default_lang === $current_lang ) {
+			return false;
+		}
+
+		$original_id = (int) apply_filters( 'wpml_object_id', (int) $term->term_id, $taxonomy, false, $default_lang );
+		if ( $original_id <= 0 ) {
+			return false;
+		}
+
+		$original_slug = $this->get_term_slug_raw( $original_id );
+		return ( $original_slug !== '' && isset( $condition_terms[ $original_slug ] ) );
+	}
+
+	/**
+	 * Whether the queried taxonomy term matches condition slugs via its WPML original.
+	 *
+	 * @param string $taxonomy
+	 * @param array  $slugs
+	 * @return bool
+	 */
+	private function wpml_queried_term_matches( $taxonomy, $slugs ) {
+		if ( ! $this->is_wpml_active() || empty( $slugs ) ) {
+			return false;
+		}
+		if ( ! ( ( $taxonomy === 'category' && is_category() ) || ( $taxonomy === 'post_tag' && is_tag() ) || is_tax( $taxonomy ) ) ) {
+			return false;
+		}
+
+		$queried = get_queried_object();
+		if ( ! ( $queried instanceof WP_Term ) || $queried->taxonomy !== $taxonomy ) {
+			return false;
+		}
+
+		/* Current-language slug may already be in the expanded list */
+		$current_slug = $this->get_term_slug_raw( (int) $queried->term_id );
+		if ( $current_slug !== '' && in_array( $current_slug, $slugs, true ) ) {
+			return true;
+		}
+
+		$default_lang = apply_filters( 'wpml_default_language', null );
+		$current_lang = apply_filters( 'wpml_current_language', null );
+		if ( ! is_string( $default_lang ) || $default_lang === '' || $default_lang === $current_lang ) {
+			return false;
+		}
+
+		$original_id = (int) apply_filters( 'wpml_object_id', (int) $queried->term_id, $taxonomy, true, $default_lang );
+		if ( $original_id > 0 ) {
+			$original_slug = $this->get_term_slug_raw( $original_id );
+			if ( $original_slug !== '' && in_array( $original_slug, $slugs, true ) ) {
+				return true;
+			}
+		}
+
+		$element_type = 'tax_' . $taxonomy;
+		foreach ( $slugs as $slug ) {
+			if ( ! is_string( $slug ) || $slug === '' ) {
+				continue;
+			}
+			$source_id = $this->find_term_id_by_slug_unfiltered( $slug, $taxonomy, $default_lang );
+			if ( $source_id < 1 ) {
+				continue;
+			}
+			$translated_id = (int) apply_filters( 'wpml_object_id', $source_id, $taxonomy, false, $current_lang );
+			if ( $translated_id > 0 && $translated_id === (int) $queried->term_id ) {
+				return true;
+			}
+			$source_tt_id = $this->get_term_taxonomy_id_raw( $source_id, $taxonomy );
+			$current_tt_id = isset( $queried->term_taxonomy_id ) ? (int) $queried->term_taxonomy_id : $this->get_term_taxonomy_id_raw( (int) $queried->term_id, $taxonomy );
+			if ( $source_tt_id > 0 && $current_tt_id > 0 ) {
+				$source_trid = apply_filters( 'wpml_element_trid', null, $source_tt_id, $element_type );
+				$current_trid = apply_filters( 'wpml_element_trid', null, $current_tt_id, $element_type );
+				if ( $source_trid && $current_trid && (int) $source_trid === (int) $current_trid ) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * @param int $term_id
+	 * @return string
+	 */
+	private function get_term_slug_raw( $term_id ) {
+		global $wpdb;
+		$term_id = (int) $term_id;
+		if ( $term_id < 1 ) {
+			return '';
+		}
+		$slug = $wpdb->get_var( $wpdb->prepare(
+			"SELECT slug FROM {$wpdb->terms} WHERE term_id = %d LIMIT 1",
+			$term_id
+		) );
+		return is_string( $slug ) ? $slug : '';
+	}
+
+	/**
+	 * @param int    $term_id
+	 * @param string $taxonomy
+	 * @return int
+	 */
+	private function get_term_taxonomy_id_raw( $term_id, $taxonomy ) {
+		global $wpdb;
+		$term_id = (int) $term_id;
+		if ( $term_id < 1 ) {
+			return 0;
+		}
+		return (int) $wpdb->get_var( $wpdb->prepare(
+			"SELECT term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE term_id = %d AND taxonomy = %s LIMIT 1",
+			$term_id,
+			$taxonomy
+		) );
+	}
+
+	/**
+	 * Find a term ID by slug without WPML language filtering.
+	 *
+	 * @param string $slug
+	 * @param string $taxonomy
+	 * @param string $lang
+	 * @return int
+	 */
+	private function find_term_id_by_slug_unfiltered( $slug, $taxonomy, $lang ) {
+		global $wpdb;
+		$slug = (string) $slug;
+		if ( $slug === '' || ! taxonomy_exists( $taxonomy ) ) {
+			return 0;
+		}
+
+		$candidates = $wpdb->get_col( $wpdb->prepare(
+			"SELECT t.term_id FROM {$wpdb->terms} t
+			INNER JOIN {$wpdb->term_taxonomy} tt ON t.term_id = tt.term_id
+			WHERE t.slug = %s AND tt.taxonomy = %s
+			ORDER BY t.term_id ASC",
+			$slug,
+			$taxonomy
+		) );
+		if ( empty( $candidates ) ) {
+			return 0;
+		}
+
+		foreach ( $candidates as $candidate_id ) {
+			$candidate_id = (int) $candidate_id;
+			$in_lang = (int) apply_filters( 'wpml_object_id', $candidate_id, $taxonomy, false, $lang );
+			if ( $in_lang === $candidate_id ) {
+				return $candidate_id;
+			}
+		}
+
+		return (int) apply_filters( 'wpml_object_id', (int) $candidates[0], $taxonomy, true, $lang );
 	}
 
 	public function add_plugin_page() {
