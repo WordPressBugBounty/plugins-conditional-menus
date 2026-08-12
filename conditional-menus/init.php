@@ -2,7 +2,7 @@
 /*
 Plugin Name:  Conditional Menus
 Plugin URI:   https://themify.me/conditional-menus
-Version:      1.2.8
+Version:      1.2.9
 Author:       Themify
 Author URI:   https://themify.me/
 Description:  This plugin enables you to set conditional menus per posts, pages, categories, archive pages, etc.
@@ -38,6 +38,9 @@ class Themify_Conditional_Menus {
 
 	/** @var array|null Resolved menu locations for the current request */
 	private $resolved_locations = null;
+
+	/** @var array Memoized menu_id => WP_Term|false lookups for renderable menus */
+	private $renderable_menus = array();
 
 	public function __construct() {
 		add_action( 'plugins_loaded', array( $this, 'constants' ), 1 );
@@ -233,12 +236,43 @@ class Themify_Conditional_Menus {
 				add_filter( 'pre_wp_nav_menu', array( $this, 'disable_menu' ), 10, 2 );
 				$args['echo'] = false;
 			} else {
-				$args['menu'] = $this->translate_nav_menu_id( $new_menu['menu'] );
-				$args['theme_location'] = apply_filters( 'conditional_menus_theme_location', '', $new_menu, $args );
+				$menu = $this->get_renderable_nav_menu( $this->translate_nav_menu_id( $new_menu['menu'] ) );
+				if ( ! $menu ) {
+					/* Leave $args alone so wp_nav_menu() keeps resolving via theme_location */
+					continue;
+				}
+				/* Pass the term object: wp_nav_menu() only swaps $args['menu'] for the
+				   object when it is empty, and walkers expect $args->menu to be one. */
+				$args['menu'] = $menu;
+				$location = apply_filters( 'conditional_menus_theme_location', '', $new_menu, $args );
+				if ( $location !== '' ) {
+					$args['theme_location'] = $location;
+				}
 			}
 		}
 
 		return $args;
+	}
+
+	/**
+	 * Resolve a menu assignment to a menu that wp_nav_menu() can actually render.
+	 *
+	 * @param int $menu_id
+	 * @return WP_Term|false
+	 */
+	private function get_renderable_nav_menu( $menu_id ) {
+		$menu_id = (int) $menu_id;
+		if ( $menu_id <= 0 ) {
+			return false;
+		}
+		if ( ! isset( $this->renderable_menus[ $menu_id ] ) ) {
+			$menu = wp_get_nav_menu_object( $menu_id );
+			$items = ( $menu && ! is_wp_error( $menu ) )
+				? wp_get_nav_menu_items( $menu->term_id, array( 'update_post_term_cache' => false ) )
+				: false;
+			$this->renderable_menus[ $menu_id ] = empty( $items ) ? false : $menu;
+		}
+		return $this->renderable_menus[ $menu_id ];
 	}
 
 	public function disable_menu( $output, $args ) {
@@ -276,7 +310,7 @@ class Themify_Conditional_Menus {
 
 	public function admin_enqueue() {
 		global $_wp_registered_nav_menus;
-		$version='1.2.8';
+		$version='1.2.9';
 		self::themify_enque_style( 'themify-conditional-menus', THEMIFY_CM_URI . 'assets/admin.css', null, $version );
 		wp_enqueue_script( 'themify-conditional-menus', self::themify_enque(THEMIFY_CM_URI . 'assets/admin.js'), array( 'jquery', 'jquery-ui-tabs' ), $version, true );
 		wp_localize_script( 'themify-conditional-menus', 'themify_cm', array(
